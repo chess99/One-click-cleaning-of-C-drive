@@ -30,6 +30,7 @@ backups/
 # 虚拟环境
 venv/
 ENV/
+.venv/
 
 # IDE文件
 .idea/

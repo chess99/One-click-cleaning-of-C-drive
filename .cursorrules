@@ -1,0 +1,9 @@
+# Cursor IDE Assistant Rules for One-click-cleaning-of-C-drive Project
+
+## Language for User-Facing Text
+
+All user-facing strings in the application UI and console output
+(e.g., button labels, window titles, messages, echo statements in batch files)
+must be in Chinese
+Internal logging messages and code comments can be in English or Chinese
+but prefer Chinese for new log messages that might be user-relevant during debugging
