@@ -10,15 +10,18 @@ import os
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
+    QTreeWidgetItemIterator,
     QVBoxLayout,
     QWidget,
 )
@@ -71,60 +74,83 @@ class CleanerMainWindow(QMainWindow):
     def init_ui(self):
         """初始化用户界面"""
         self.setWindowTitle("C盘清理工具")
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(800, 650)
         
-        # 主布局
         central_widget = QWidget()
         main_layout = QVBoxLayout(central_widget)
         
-        # 顶部信息区域
         info_group = QGroupBox("系统信息")
         info_layout = QVBoxLayout(info_group)
-        
         self.disk_info_label = QLabel("C盘使用情况: 正在加载...")
         info_layout.addWidget(self.disk_info_label)
         
-        # 扫描和清理按钮区域
         button_layout = QHBoxLayout()
-        
         self.scan_button = QPushButton("扫描系统")
         self.scan_button.setMinimumHeight(40)
         self.scan_button.clicked.connect(self.start_scan)
+        button_layout.addWidget(self.scan_button)
+
+        self.clean_all_button = QPushButton("一键清理")
+        self.clean_all_button.setMinimumHeight(40)
+        self.clean_all_button.setEnabled(False)
+        self.clean_all_button.clicked.connect(self.start_clean_all)
+        button_layout.addWidget(self.clean_all_button)
         
         self.clean_button = QPushButton("清理选中项")
         self.clean_button.setMinimumHeight(40)
         self.clean_button.setEnabled(False)
         self.clean_button.clicked.connect(self.start_clean)
-        
-        button_layout.addWidget(self.scan_button)
         button_layout.addWidget(self.clean_button)
+
+        self.select_all_button = QPushButton("全选")
+        self.select_all_button.setMinimumHeight(40)
+        self.select_all_button.setEnabled(False)
+        self.select_all_button.clicked.connect(self.select_all_items)
+        button_layout.addWidget(self.select_all_button)
+
+        self.deselect_all_button = QPushButton("取消全选")
+        self.deselect_all_button.setMinimumHeight(40)
+        self.deselect_all_button.setEnabled(False)
+        self.deselect_all_button.clicked.connect(self.deselect_all_items)
+        button_layout.addWidget(self.deselect_all_button)
         
-        # 进度条
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.status_label = QLabel("")
         
-        # 结果树
         self.results_tree = QTreeWidget()
         self.results_tree.setHeaderLabels(["项目", "大小", "路径"])
         self.results_tree.setColumnWidth(0, 250)
         self.results_tree.setColumnWidth(1, 100)
         self.results_tree.itemChanged.connect(self.on_item_changed)
         
-        # 安全选项
         safety_group = QGroupBox("安全选项")
         safety_layout = QVBoxLayout(safety_group)
         
         self.simulate_checkbox = QCheckBox("模拟模式 (不实际删除文件)")
         self.simulate_checkbox.setChecked(True)
+        safety_layout.addWidget(self.simulate_checkbox)
         
         self.backup_checkbox = QCheckBox("删除前备份文件")
         self.backup_checkbox.setChecked(True)
-        
-        safety_layout.addWidget(self.simulate_checkbox)
         safety_layout.addWidget(self.backup_checkbox)
+
+        backup_dir_layout = QHBoxLayout()
+        backup_dir_label = QLabel("备份目录:")
+        backup_dir_layout.addWidget(backup_dir_label)
+
+        self.backup_dir_edit = QLineEdit(self.cleaner.backup_dir)
+        backup_dir_layout.addWidget(self.backup_dir_edit)
+
+        browse_backup_button = QPushButton("浏览...")
+        browse_backup_button.clicked.connect(self.browse_backup_dir)
+        backup_dir_layout.addWidget(browse_backup_button)
+        safety_layout.addLayout(backup_dir_layout)
+
+        self.backup_manager_button = QPushButton("备份管理")
+        self.backup_manager_button.clicked.connect(self.open_backup_manager)
+        safety_layout.addWidget(self.backup_manager_button, 0, Qt.AlignLeft)
         
-        # 添加所有组件到主布局
         main_layout.addWidget(info_group)
         main_layout.addLayout(button_layout)
         main_layout.addWidget(self.progress_bar)
@@ -134,7 +160,6 @@ class CleanerMainWindow(QMainWindow):
         
         self.setCentralWidget(central_widget)
         
-        # 初始化磁盘信息
         self.update_disk_info()
     
     def update_disk_info(self):
@@ -150,12 +175,14 @@ class CleanerMainWindow(QMainWindow):
         """开始扫描系统"""
         self.scan_button.setEnabled(False)
         self.clean_button.setEnabled(False)
+        self.clean_all_button.setEnabled(False)
+        self.select_all_button.setEnabled(False)
+        self.deselect_all_button.setEnabled(False)
         self.results_tree.clear()
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # 不确定进度
+        self.progress_bar.setRange(0, 0)
         self.status_label.setText("正在扫描系统，请稍候...")
         
-        # 启动扫描线程
         self.scan_thread = ScanThread(self.cleaner)
         self.scan_thread.finished_signal.connect(self.on_scan_finished)
         self.scan_thread.start()
@@ -166,55 +193,111 @@ class CleanerMainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.scan_button.setEnabled(True)
         
-        if not results:
+        if not results or not any(results.values()): # Check if results dict itself is empty or all its lists are empty
             self.status_label.setText("扫描完成，未发现可清理项目")
+            self.clean_all_button.setEnabled(False)
+            self.select_all_button.setEnabled(False)
+            self.deselect_all_button.setEnabled(False)
+            self.results_tree.clear() # Clear tree if no results
             return
             
-        total_size = sum(item['size'] for category in results.values() for item in category)
+        total_size = sum(item['size'] for category_items in results.values() for item in category_items)
         self.status_label.setText(f"扫描完成，发现可释放空间: {self.format_size(total_size)}")
         
-        # 填充结果树
         self.populate_results_tree(results)
-        self.update_selected_items()
+        self.update_selected_items() 
+        self.clean_all_button.setEnabled(True)
+        self.select_all_button.setEnabled(True)
+        self.deselect_all_button.setEnabled(True)
         
-        # 更新磁盘信息
         self.update_disk_info()
     
     def populate_results_tree(self, results):
         """填充结果树"""
         self.results_tree.clear()
         
-        categories = {
+        # Comprehensive categories from the tkinter version
+        categories_display_names = {
+            # 基本清理
             'temp': "临时文件",
             'recycle': "回收站",
             'cache': "浏览器缓存",
             'logs': "系统日志",
             'updates': "Windows更新缓存",
             'thumbnails': "缩略图缓存",
-            'downloads': "下载文件夹"
+
+            # 扩展清理
+            'prefetch': "预读取文件",
+            'old_windows': "旧Windows文件",
+            'error_reports': "错误报告",
+            'service_packs': "服务包备份",
+            'memory_dumps': "内存转储文件",
+            'font_cache': "字体缓存",
+            'disk_cleanup': "磁盘清理备份",
+
+            # 新增安全清理项 (These were in tk version, ensure cleaner_logic produces them)
+            'app_cache': "应用程序缓存",
+            'media_cache': "媒体播放器缓存",
+            'search_index': "搜索索引临时文件",
+            'backup_temp': "备份临时文件",
+            'update_temp': "更新临时文件",
+            'driver_backup': "驱动备份",
+            'app_crash': "应用程序崩溃转储",
+            'app_logs': "应用程序日志",
+            'recent_items': "最近使用的文件列表",
+            'notification': "Windows通知缓存",
+            'dns_cache': "DNS缓存",
+            'network_cache': "网络缓存",
+            'printer_temp': "打印机临时文件",
+            'device_temp': "设备临时文件",
+            'windows_defender': "Windows Defender缓存",
+            'store_cache': "Windows Store缓存",
+            'onedrive_cache': "OneDrive缓存",
+
+            # 新增用户请求的清理项 (These were in tk version)
+            'downloads': "下载文件夹(立即清理)", # Note: This was '下载文件夹' in simpler PyQt5 version
+            'installer_cache': "安装程序缓存(30天前)",
+            'delivery_opt': "Windows传递优化缓存(立即清理)",
+
+            # 大文件扫描
+            'large_files': "大文件 (>100MB)" # Tkinter used this key
         }
         
-        for category, items in results.items():
+        # Iterate through the defined order if a specific order is preferred, 
+        # otherwise, Python 3.7+ dicts maintain insertion order.
+        # For now, using results.items() which depends on cleaner_logic's output order.
+        for category_key, items in results.items():
             if not items:
                 continue
                 
             category_size = sum(item['size'] for item in items)
-            category_name = categories.get(category, category)
+            # Use the display name from our comprehensive dict, fallback to key if not found
+            category_display_name = categories_display_names.get(category_key, category_key.replace('_', ' ').title())
             
             category_item = QTreeWidgetItem(self.results_tree)
-            category_item.setText(0, category_name)
+            category_item.setText(0, category_display_name)
             category_item.setText(1, self.format_size(category_size))
             category_item.setFlags(category_item.flags() | Qt.ItemIsUserCheckable)
             category_item.setCheckState(0, Qt.Unchecked)
+            category_item.setData(0, Qt.UserRole + 1, category_key) # Store category key for later use if needed
             
-            for item in items:
+            for item_data in items:
                 file_item = QTreeWidgetItem(category_item)
-                file_item.setText(0, os.path.basename(item['path']))
-                file_item.setText(1, self.format_size(item['size']))
-                file_item.setText(2, item['path'])
+                base_name = os.path.basename(item_data['path'])
+                display_text = base_name
+
+                # Special handling for 'large_files' as in tkinter version
+                if category_key == 'large_files':
+                    modified_time = item_data.get('modified', '未知')
+                    extension = item_data.get('extension', '未知')
+                    display_text = f"{base_name} [修改时间: {modified_time}] [类型: {extension}]"
+                
+                file_item.setText(0, display_text) # Column 0: Name (or enhanced name for large files)
+                file_item.setText(1, self.format_size(item_data['size'])) # Column 1: Size
+                file_item.setText(2, item_data['path']) # Column 2: Path
                 file_item.setFlags(file_item.flags() | Qt.ItemIsUserCheckable)
                 file_item.setCheckState(0, Qt.Unchecked)
-                file_item.setData(0, Qt.UserRole, item)
+                file_item.setData(0, Qt.UserRole, item_data) # Store the original item dict
         
         self.results_tree.expandAll()
     
@@ -222,31 +305,67 @@ class CleanerMainWindow(QMainWindow):
         """处理项目选择状态变化"""
         if column != 0:
             return
-            
-        # 如果是类别项，同步所有子项
-        if item.parent() is None:
-            check_state = item.checkState(0)
-            for i in range(item.childCount()):
-                item.child(i).setCheckState(0, check_state)
+
+        # Block signals for the tree during this method's logic to prevent recursion
+        # from programmatic setCheckState calls within this handler.
+        original_signals_blocked = self.results_tree.signalsBlocked()
+        self.results_tree.blockSignals(True)
+
+        try:
+            current_check_state = item.checkState(0)
+
+            # If a category (parent) item is changed
+            if item.parent() is None:
+                for i in range(item.childCount()):
+                    child = item.child(i)
+                    if child.checkState(0) != current_check_state:
+                        child.setCheckState(0, current_check_state)
+            # If a file (child) item is changed
+            else:
+                parent = item.parent()
+                all_children_fully_checked = True
+                any_child_checked_or_partially = False
+
+                for i in range(parent.childCount()):
+                    child_state = parent.child(i).checkState(0)
+                    if child_state != Qt.Checked:
+                        all_children_fully_checked = False # If even one is not fully checked
+                    if child_state == Qt.Checked or child_state == Qt.PartiallyChecked:
+                        any_child_checked_or_partially = True
+                
+                if all_children_fully_checked:
+                    if parent.checkState(0) != Qt.Checked:
+                        parent.setCheckState(0, Qt.Checked)
+                elif any_child_checked_or_partially: # Some are checked/partially, but not all are fully checked
+                    if parent.checkState(0) != Qt.PartiallyChecked:
+                        parent.setCheckState(0, Qt.PartiallyChecked)
+                else: # No children are checked (all are Qt.Unchecked)
+                    if parent.checkState(0) != Qt.Unchecked:
+                        parent.setCheckState(0, Qt.Unchecked)
+        finally:
+            # Restore original signal blocking state
+            self.results_tree.blockSignals(original_signals_blocked)
         
-        # 更新选中项列表
+        # This call is now made after all programmatic changes within this handler are done
+        # and signals are restored, so it reflects the final state.
         self.update_selected_items()
     
     def update_selected_items(self):
-        """更新选中的项目列表"""
+        """更新选中的项目列表 (Collects selected data and updates button state)"""
         self.selected_items = []
         
-        for i in range(self.results_tree.topLevelItemCount()):
-            category_item = self.results_tree.topLevelItem(i)
+        # Iterate through all items to find checked children (file items)
+        # No need to block signals here as we are only reading states, not setting them.
+        iterator = QTreeWidgetItemIterator(self.results_tree)
+        while iterator.value():
+            item = iterator.value()
+            # We are interested in actual file items (children of categories) that are checked
+            if item.parent() is not None and item.checkState(0) == Qt.Checked:
+                item_data = item.data(0, Qt.UserRole) # This is the original dict for the file
+                if item_data: 
+                    self.selected_items.append(item_data)
+            iterator += 1 # Move to the next item in the tree
             
-            for j in range(category_item.childCount()):
-                child_item = category_item.child(j)
-                if child_item.checkState(0) == Qt.Checked:
-                    item_data = child_item.data(0, Qt.UserRole)
-                    if item_data:
-                        self.selected_items.append(item_data)
-        
-        # 更新清理按钮状态
         self.clean_button.setEnabled(len(self.selected_items) > 0)
     
     def start_clean(self):
@@ -254,7 +373,6 @@ class CleanerMainWindow(QMainWindow):
         if not self.selected_items:
             return
             
-        # 确认对话框
         total_size = sum(item['size'] for item in self.selected_items)
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Warning)
@@ -270,21 +388,24 @@ class CleanerMainWindow(QMainWindow):
         if msg.exec_() != QMessageBox.Yes:
             return
         
-        # 设置清理选项
-        self.cleaner.set_options({
+        options = {
             'simulate': self.simulate_checkbox.isChecked(),
-            'backup': self.backup_checkbox.isChecked()
-        })
+            'backup': self.backup_checkbox.isChecked(),
+            'backup_dir': self.backup_dir_edit.text()
+        }
+        self.cleaner.set_options(options)
         
-        # 开始清理
         self.scan_button.setEnabled(False)
         self.clean_button.setEnabled(False)
+        self.clean_all_button.setEnabled(False)
+        self.select_all_button.setEnabled(False)
+        self.deselect_all_button.setEnabled(False)
+
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.progress_bar.setRange(0, len(self.selected_items))
         self.status_label.setText("正在清理文件，请稍候...")
         
-        # 启动清理线程
         self.clean_thread = CleanThread(self.cleaner, self.selected_items)
         self.clean_thread.update_signal.connect(self.on_clean_progress)
         self.clean_thread.finished_signal.connect(self.on_clean_finished)
@@ -296,9 +417,14 @@ class CleanerMainWindow(QMainWindow):
         self.status_label.setText(f"正在清理: {os.path.basename(file_path)}")
     
     def on_clean_finished(self, results):
-        """清理完成后的处理"""
+        """清理完成后的处理 (for selected items)"""
         self.progress_bar.setVisible(False)
         self.scan_button.setEnabled(True)
+        # Enable buttons that should be active if scan results exist
+        if self.scan_results:
+            self.clean_all_button.setEnabled(True) 
+            self.select_all_button.setEnabled(True)
+            self.deselect_all_button.setEnabled(True)
         
         freed_space = results.get('freed_space', 0)
         errors = results.get('errors', [])
@@ -313,7 +439,6 @@ class CleanerMainWindow(QMainWindow):
         
         self.status_label.setText(message)
         
-        # 如果有错误，显示错误日志
         if errors:
             error_msg = QMessageBox()
             error_msg.setIcon(QMessageBox.Warning)
@@ -325,8 +450,161 @@ class CleanerMainWindow(QMainWindow):
             error_msg.setDetailedText(error_details)
             error_msg.exec_()
         
-        # 更新磁盘信息
         self.update_disk_info()
+        # Re-populate the tree. Items that were cleaned might no longer be part of scan_results 
+        # if cleaner_logic.scan_system() is designed to exclude already handled/non-existent items.
+        # Or, if cleaner_logic.clean_selected modifies scan_results, this will reflect changes.
+        # For now, assume populate_results_tree with original scan_results is sufficient and selection states will clear.
+        if self.scan_results: # Only populate if there were results to begin with
+            self.populate_results_tree(self.scan_results) 
+        self.update_selected_items() # Update button states and selected items list
+
+    def start_clean_all(self):
+        """开始一键清理所有扫描到的项目"""
+        if not self.scan_results or not any(self.scan_results.values()):
+            QMessageBox.information(self, "提示", "没有可清理的项目。请先扫描系统。")
+            return
+
+        all_items_to_clean = []
+        for category_items in self.scan_results.values():
+            all_items_to_clean.extend(category_items)
+
+        if not all_items_to_clean:
+            QMessageBox.information(self, "提示", "扫描结果中未发现具体的可清理文件项。")
+            return
+
+        total_size = sum(item['size'] for item in all_items_to_clean)
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("确认一键清理")
+
+        if self.simulate_checkbox.isChecked():
+            msg.setText(f"您选择了模拟模式，将会模拟清理所有 {len(all_items_to_clean)} 个扫描到的项目，总计 {self.format_size(total_size)}。")
+        else:
+            msg.setText(f"您确定要清理所有 {len(all_items_to_clean)} 个扫描到的项目，总计 {self.format_size(total_size)} 吗？")
+            msg.setInformativeText("此操作无法撤销！建议先备份重要数据。")
+        
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        if msg.exec_() != QMessageBox.Yes:
+            return
+
+        options = {
+            'simulate': self.simulate_checkbox.isChecked(),
+            'backup': self.backup_checkbox.isChecked(),
+            'backup_dir': self.backup_dir_edit.text()
+        }
+        self.cleaner.set_options(options)
+
+        self.scan_button.setEnabled(False)
+        self.clean_button.setEnabled(False)
+        self.clean_all_button.setEnabled(False)
+        self.select_all_button.setEnabled(False)
+        self.deselect_all_button.setEnabled(False)
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setRange(0, len(all_items_to_clean))
+        self.status_label.setText("正在执行一键清理，请稍候...")
+
+        # Use a new attribute for the clean_all_thread to avoid conflicts if needed
+        self.clean_all_thread = CleanThread(self.cleaner, all_items_to_clean)
+        self.clean_all_thread.update_signal.connect(self.on_clean_progress) # Can reuse progress update
+        self.clean_all_thread.finished_signal.connect(self.on_clean_all_finished) # Specific finish handler
+        self.clean_all_thread.start()
+
+    def on_clean_all_finished(self, results):
+        """一键清理完成后的处理"""
+        self.progress_bar.setVisible(False)
+        self.scan_button.setEnabled(True)
+        # Re-enable buttons that should be active if scan results *could* exist (even if now empty)
+        self.clean_all_button.setEnabled(True) 
+        self.select_all_button.setEnabled(True)
+        self.deselect_all_button.setEnabled(True)
+
+        freed_space = results.get('freed_space', 0)
+        errors = results.get('errors', [])
+
+        if self.simulate_checkbox.isChecked():
+            message = f"模拟一键清理完成，可释放空间: {self.format_size(freed_space)}"
+        else:
+            message = f"一键清理完成，已释放空间: {self.format_size(freed_space)}"
+        
+        if errors:
+            message += f"，{len(errors)} 个错误"
+        
+        self.status_label.setText(message)
+
+        if errors:
+            error_msg = QMessageBox()
+            error_msg.setIcon(QMessageBox.Warning)
+            error_msg.setWindowTitle("清理错误")
+            error_msg.setText(f"一键清理过程中发生 {len(errors)} 个错误")
+            error_details = "\n".join([f"{err['path']}: {err['error']}" for err in errors[:10]])
+            if len(errors) > 10:
+                error_details += f"\n... 以及 {len(errors) - 10} 个其他错误"
+            error_msg.setDetailedText(error_details)
+            error_msg.exec_()
+
+        self.update_disk_info()
+        # After cleaning, it's best to reflect that scan results are now stale or changed.
+        # Clearing the tree and selected items is a good default.
+        # User might need to re-scan to see updated state accurately.
+        self.results_tree.clear()
+        self.scan_results = {} # Clear current scan results as they are no longer valid
+        self.update_selected_items() # This will also disable clean_button
+        
+        if not self.simulate_checkbox.isChecked():
+            rescan_prompt = QMessageBox.question(self, "清理完成", 
+                                                 f"{message}\n\n是否需要重新扫描系统？", 
+                                                 QMessageBox.Yes | QMessageBox.No)
+            if rescan_prompt == QMessageBox.Yes:
+                self.start_scan()
+        else:
+            QMessageBox.information(self, "模拟清理完成", message)
+
+    def select_all_items(self):
+        """全选树中的所有项目"""
+        self.results_tree.blockSignals(True) # Block itemChanged signals during bulk update
+        for i in range(self.results_tree.topLevelItemCount()):
+            category_item = self.results_tree.topLevelItem(i)
+            category_item.setCheckState(0, Qt.Checked)
+            for j in range(category_item.childCount()):
+                child_item = category_item.child(j)
+                child_item.setCheckState(0, Qt.Checked)
+        self.results_tree.blockSignals(False)
+        self.update_selected_items() # Update the selected list and button states
+
+    def deselect_all_items(self):
+        """取消全选树中的所有项目"""
+        self.results_tree.blockSignals(True) # Block itemChanged signals during bulk update
+        for i in range(self.results_tree.topLevelItemCount()):
+            category_item = self.results_tree.topLevelItem(i)
+            category_item.setCheckState(0, Qt.Unchecked)
+            for j in range(category_item.childCount()):
+                child_item = category_item.child(j)
+                child_item.setCheckState(0, Qt.Unchecked)
+        self.results_tree.blockSignals(False)
+        self.update_selected_items() # Update the selected list and button states
+
+    def browse_backup_dir(self):
+        """浏览选择备份目录"""
+        current_dir = self.backup_dir_edit.text()
+        if not os.path.isdir(current_dir): # Check if current path is a valid directory
+            current_dir = os.path.expanduser("~") # Default to home if not valid
+
+        backup_dir = QFileDialog.getExistingDirectory(
+            self, 
+            "选择备份目录", 
+            current_dir # Start browsing from current or home directory
+        )
+
+        if backup_dir: # If a directory was selected (not cancelled)
+            self.backup_dir_edit.setText(backup_dir)
+            # Optionally, update cleaner_logic immediately if desired, or just use the text field value at clean time
+            # self.cleaner.set_options({'backup_dir': backup_dir}) 
+
+    def open_backup_manager(self):
+        QMessageBox.information(self, "提示", "'备份管理' 功能暂未实现。")
     
     @staticmethod
     def format_size(size_bytes):
@@ -346,21 +624,15 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication
 
-    # 配置日志 (moved from old main.py)
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        filename='cleaner.log'  # Make sure this path is correct or adjust as needed
+        filename='cleaner.log'
     )
-    logger = logging.getLogger('CleanerAppPyQt') # Changed logger name slightly
+    logger = logging.getLogger('CleanerAppPyQt')
 
     app = QApplication(sys.argv)
-    
-    # Optionally, apply a style if default rendering is problematic
-    # app.setStyle("Fusion") 
-
     main_window = CleanerMainWindow()
     main_window.show()
-    
-    logger.info("应用程序已启动。") # Changed to Chinese
+    logger.info("应用程序已启动。")
     sys.exit(app.exec_()) 
